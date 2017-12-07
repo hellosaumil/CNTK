@@ -779,3 +779,21 @@ def test_topk_backward(device_id, precision):
     cg = y.backward(dy, {y.outputs[0]:root}, set([q]))[q]
     for i in range(2):
         check_grad_last_axis(q0[i], root[i], indices[i], cg[i])
+
+
+def test_data_resize():
+    batch_size = 8
+    w = C.parameter(shape=(3, 2), name='w1')
+    x = C.input_variable(shape=[3], name='x')
+    y = C.softmax(C.times(x, w))
+    y = C.unpack_batch(y)
+    y = C.reshape(y, [batch_size * 2])
+    loss = C.reduce_mean(-C.log(y))
+
+    learning_rate = 0.01
+    lr_schedule = C.learning_rate_schedule(learning_rate, C.UnitType.minibatch)
+    learner = C.sgd(y.parameters, lr_schedule, gradient_clipping_threshold_per_sample=1.0)
+    trainer = C.Trainer(y, (loss), [learner])
+
+    features = np.random.randn(batch_size, 3)
+    trainer.train_minibatch({x: features})
