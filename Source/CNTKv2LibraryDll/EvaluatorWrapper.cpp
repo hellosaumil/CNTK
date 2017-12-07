@@ -65,31 +65,38 @@ namespace CNTK
 
             auto inputValue = inputValues[i];
             auto inputShape = ToNDShape(inputValue.shape);
-            auto inputSampleShape = inputShape.SubShape(0, inputShape.Rank() - 1);
-
-            // Prepare the mask.
-            NDMaskPtr mask = nullptr;
-            if (!inputResetFlags[i])
-            {
-                mask = make_shared<NDMask>(inputShape);
-                mask->MarkSequenceBegin({ 0 });
-            }
+            auto inputSampleShape = inputShape.SubShape(0, var->second.Shape().Rank());
+            if(inputSampleShape != var->second.Shape())
+                InvalidArgument("Unexpected sample dimensionality of the input '%ls'.", inputs[i].name);
 
             ValuePtr value = nullptr;
             NDArrayViewPtr data = nullptr;
-            if (inputShape == var->second.Shape())
+            NDShape maskShape = inputShape.SubShape(var->second.Shape().Rank(), inputShape.Rank());
+            if(maskShape.Rank() > 2)
+                InvalidArgument("Unexpected sequence/batch dimensionality of the input '%ls'.", inputs[i].name);
+
+            if (maskShape.Rank() == 1) // Adding batch axis
             {
-                data = make_shared<NDArrayView>(DataType::Float, inputShape, inputValue.data, inputValue.dataSize * sizeof(float), m_device);
+                maskShape = maskShape.AppendShape({ 1 });
+                inputShape = inputShape.AppendShape({ 1 });
             }
-            else if (inputSampleShape == var->second.Shape())
+            else if (maskShape.Rank() == 0)
             {
-                data = make_shared<NDArrayView>(DataType::Float, inputShape.AppendShape(NDShape{ 1 }), inputValue.data, inputValue.dataSize * sizeof(float), m_device);
+                maskShape = NDShape{ 1 , 1 };
+                inputShape = inputShape.AppendShape({ 1, 1 });
             }
-            else
-                InvalidArgument("Unexpected dimensionality of the input '%ls'.", inputs[i].name);
+            else // Rank == 2
+            {
+                if(maskShape.Dimensions().back() != 1)
+                    InvalidArgument("Evluation of batches with several sequence is not yet supported, input '%ls'.", inputs[i].name);
+            }
+
+            data = make_shared<NDArrayView>(DataType::Float, inputShape, inputValue.data, inputValue.dataSize * sizeof(float), m_device);
+            NDMaskPtr mask = make_shared<NDMask>(maskShape);
+            if (inputResetFlags[i])
+                mask->MarkSequenceBegin({0, 0});
 
             value = make_shared<Value>(data, mask);
-
             preparedInputs[var->second] = value;
         }
 
@@ -102,13 +109,18 @@ namespace CNTK
                 InvalidArgument("Unexpected output.");
 
             ValuePtr value = nullptr;
-            if (*outputValues != nullptr) // Buffer has been preallocated, TODO: make sure the user did not mess up.
+            if (*outputValues != nullptr) // Buffer has been preallocated.
             {
                 auto buffer = *outputValues[i];
-                auto data = make_shared<NDArrayView>(DataType::Float, ToNDShape(buffer.shape), buffer.data, buffer.dataSize * sizeof(float), m_device);
-                value = make_shared<Value>(data);
-            }
+                auto shape = ToNDShape(buffer.shape);
+                auto sampleShape = shape.SubShape(0, var->second.Shape().Rank());
+                if(sampleShape != var->second.Shape())
+                    InvalidArgument("Unexpected sample dimensionality of the output '%ls'.", outputs[i].name);
 
+                NDShape maskShape = shape.SubShape(var->second.Shape().Rank(), shape.Rank());
+                auto data = make_shared<NDArrayView>(DataType::Float, shape, buffer.data, buffer.dataSize * sizeof(float), m_device);
+                value = make_shared<Value>(data, make_shared<NDMask>(maskShape));
+            }
             preparedOutputs[var->second] = value;
         }
 
@@ -121,7 +133,7 @@ namespace CNTK
         if (*outputValues != nullptr)
             return;
 
-        // Copy to outputs if non were provided.
+        // Copy to outputs if none was provided.
         auto arrayValueCleaner = std::bind(CleanAndDestroyValues, _1, preparedOutputs.size());
         unique_ptr<CNTK_Value, decltype(arrayValueCleaner)> result(new CNTK_Value[preparedOutputs.size()], arrayValueCleaner);
         memset(result.get(), 0, sizeof(CNTK_Value) * preparedOutputs.size());
